@@ -1,0 +1,50 @@
+# Dependencies
+node_modules/
+frontend/node_modules/
+
+# Build output
+frontend/dist/
+backend/target/
+agent/__pycache__/
+agent/src/__pycache__/
+agent/.venv/
+
+# Environment files
+.env
+backend/.env
+agent/.env
+frontend/.env.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database
+*.db
+*.db-journal
+
+# Rust
+backend/target/
+
+# Python
+*.pyc
+__pycache__/
+*.egg-info/
+dist/
+build/
+
+# Logs
+*.log
+
+# Temp files
+tmpclaude-*-cwd
+nul
+
+# OMC
+.omc/

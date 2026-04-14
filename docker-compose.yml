@@ -1,0 +1,31 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-amis_ai}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-amis_ai_dev}
+      POSTGRES_DB: ${POSTGRES_DB:-amis_ai}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./shared/docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U amis_ai"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./shared/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    depends_on:
+      - postgres
+
+volumes:
+  postgres_data:
