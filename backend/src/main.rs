@@ -61,10 +61,13 @@ async fn main() {
     seed_users(&db).await;
     seed_llm_configs(&db).await;
 
-    // 共享状态
+    // 禁用系统代理，避免本地代理软件拦截对 LLM API 的请求
     let state = AppState {
         db,
-        http_client: reqwest::Client::new(),
+        http_client: reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .expect("无法创建 HTTP 客户端"),
     };
 
     // CORS（开发阶段全放开）

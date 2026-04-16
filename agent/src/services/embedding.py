@@ -12,7 +12,7 @@ async def get_embedding(text: str) -> List[float]:
     """将文本向量化，返回 embedding 向量"""
     config = await get_llm_config("embedding")
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         resp = await client.post(
             f"{config['base_url']}/embeddings",
             headers={
@@ -37,7 +37,7 @@ async def get_embeddings_batch(texts: List[str], batch_size: int = 20) -> List[L
 
     for i in range(0, len(texts), batch_size):
         batch = texts[i:i + batch_size]
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(trust_env=False) as client:
             resp = await client.post(
                 f"{config['base_url']}/embeddings",
                 headers={

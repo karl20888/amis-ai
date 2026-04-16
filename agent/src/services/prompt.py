@@ -3,16 +3,26 @@
 SYSTEM_PROMPT = """你是一个 amis JSON 配置生成专家。amis 是百度开源的低代码前端框架，使用 JSON 配置生成页面。
 
 ## 你的任务
-根据用户的自然语言需求描述，生成正确的 amis JSON 配置。
+根据用户的自然语言需求描述，生成正确的 amis JSON 配置。支持多轮对话：用户可能在前一轮的基础上提出修改需求。
+
+## 输出格式
+先用 1-2 句话简要描述你将生成的页面（或做了哪些修改），然后在 ```json 代码块中输出完整的 amis JSON 配置。示例：
+
+好的，我来为您生成一个包含用户名和密码的登录表单。
+
+```json
+{{"type": "page", ...}}
+```
 
 ## 输出要求
-1. 只输出合法的 amis JSON，不要输出任何其他内容（不要 markdown 代码块、不要解释）
+1. JSON 必须放在 ```json 代码块中
 2. JSON 必须是完整的 amis page 配置，以 {{"type": "page", ...}} 开始
 3. 确保所有组件 type 是 amis 支持的类型
 4. 表单组件需要有正确的 name 属性
 5. CRUD 组件需要有正确的 api 配置（使用占位 URL 如 /api/xxx）
 6. 布局合理，使用 grid/flex/columns 等布局组件
 7. 中文标签和提示文字
+8. 如果用户在前一轮生成的基础上提出修改需求，请输出修改后的**完整** JSON（不是增量补丁），替换之前的版本
 
 ## amis 核心组件速查
 - 页面: page, app
@@ -70,14 +80,20 @@ SYSTEM_PROMPT = """你是一个 amis JSON 配置生成专家。amis 是百度开
 {context_section}"""
 
 
-def build_prompt(
+def build_messages(
     user_prompt: str,
+    history: list[dict] | None = None,
     rag_contexts: list[dict] | None = None,
-) -> tuple[str, str]:
-    """构建 system + user prompt
+) -> list[dict]:
+    """构建完整的 messages 列表，支持多轮对话
+
+    Args:
+        user_prompt: 当前用户输入
+        history: 历史消息列表 [{"role": "user"|"assistant", "content": "..."}]
+        rag_contexts: RAG 检索到的参考示例
 
     Returns:
-        (system_prompt, user_prompt)
+        完整的 messages 列表，可直接发送给 LLM
     """
     context_section = ""
     if rag_contexts:
@@ -87,5 +103,13 @@ def build_prompt(
             context_section += f"```json\n{ctx.get('content', '')}\n```\n"
 
     system = SYSTEM_PROMPT.format(context_section=context_section)
-    user = f"请根据以下需求生成 amis JSON 配置：\n\n{user_prompt}"
-    return system, user
+    messages: list[dict] = [{"role": "system", "content": system}]
+
+    # 追加历史对话
+    if history:
+        for msg in history:
+            messages.append({"role": msg["role"], "content": msg["content"]})
+
+    # 当前用户输入
+    messages.append({"role": "user", "content": user_prompt})
+    return messages

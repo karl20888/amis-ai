@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Table, Button, Modal, Form, Input, Switch, Space, message, notification, Popconfirm, Tag } from 'antd';
+import { Table, Button, Modal, Form, Input, Switch, Space, Popconfirm, Tag, App } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined, ApiOutlined } from '@ant-design/icons';
 import { getProviders, createProvider, updateProvider, deleteProvider, testProvider } from '../../services/llm';
 
@@ -19,6 +19,7 @@ export default function LlmProviders() {
   const [editingId, setEditingId] = useState<number | null>(null);
   const [testingId, setTestingId] = useState<number | null>(null);
   const [form] = Form.useForm();
+  const { message, notification } = App.useApp();
 
   const fetchProviders = useCallback(async () => {
     setLoading(true);

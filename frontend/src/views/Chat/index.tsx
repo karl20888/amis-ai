@@ -1,240 +1,119 @@
-import { useState, useRef, useCallback } from 'react';
-import { Input, Button, Card, Tabs, Spin, message, Typography, Space, Tag } from 'antd';
-import { SendOutlined, CopyOutlined, CheckOutlined, ReloadOutlined } from '@ant-design/icons';
+import { useRef, useState, useCallback } from 'react';
+import { Button, Card, Tabs, message, Typography, Space, Tag } from 'antd';
+import { CopyOutlined, CheckOutlined } from '@ant-design/icons';
+import { ProChat, ChatMessage } from '@ant-design/pro-chat';
 import AmisRenderer from '../../components/AmisRenderer';
 import { createHistory, adoptHistory } from '../../services/generation';
 
-const { TextArea } = Input;
 const { Text } = Typography;
 
-interface ChatMessage {
-  role: 'user' | 'assistant';
-  content: string;
-  amisJson?: string;
-  modelUsed?: string;
-  historyId?: number;
-  adopted?: boolean;
-  loading?: boolean;
+/**
+ * 把后端自定义 SSE 转换为纯文本流（ProChat 直接读原始字节，不解析 SSE 格式）。
+ * 同时从流中提取 amis_json、model_used 等元信息。
+ */
+function transformSSEStream(
+  originalBody: ReadableStream<Uint8Array>,
+  resultRef: React.MutableRefObject<{
+    amisJson: string;
+    modelUsed: string;
+  } | null>,
+): ReadableStream<Uint8Array> {
+  const reader = originalBody.getReader();
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let sseBuffer = '';
+
+  return new ReadableStream({
+    async pull(controller) {
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          if (sseBuffer.trim()) {
+            processSSELines(sseBuffer.split('\n'), controller, encoder, resultRef);
+          }
+          controller.close();
+          return;
+        }
+
+        sseBuffer += decoder.decode(value, { stream: true });
+        const lines = sseBuffer.split('\n');
+        sseBuffer = lines.pop() || '';
+
+        const hasOutput = processSSELines(lines, controller, encoder, resultRef);
+        if (hasOutput) return; // 有输出则让 ProChat 消费
+      }
+    },
+  });
+}
+
+function processSSELines(
+  lines: string[],
+  controller: ReadableStreamDefaultController<Uint8Array>,
+  encoder: TextEncoder,
+  resultRef: React.MutableRefObject<{ amisJson: string; modelUsed: string } | null>,
+): boolean {
+  let hasOutput = false;
+  for (const line of lines) {
+    if (line.startsWith('event:') || !line.startsWith('data: ')) continue;
+    const dataStr = line.slice(6);
+    try {
+      const data = JSON.parse(dataStr);
+      // 流式内容 → 直接输出纯文本（ProChat 按原始字节读取）
+      if (data.content) {
+        controller.enqueue(encoder.encode(data.content));
+        hasOutput = true;
+      }
+      // 最终结果
+      if (data.amis_json !== undefined) {
+        resultRef.current = {
+          amisJson: data.amis_json,
+          modelUsed: data.model_used || '',
+        };
+      }
+      // meta 事件
+      if (data.model && !data.content) {
+        resultRef.current = {
+          ...(resultRef.current || { amisJson: '', modelUsed: '' }),
+          modelUsed: data.model,
+        };
+      }
+    } catch {
+      // 忽略无法解析的行
+    }
+  }
+  return hasOutput;
 }
 
 export default function Chat() {
-  const [inputValue, setInputValue] = useState('');
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [generating, setGenerating] = useState(false);
   const [currentJson, setCurrentJson] = useState<string | null>(null);
   const [activeTab, setActiveTab] = useState('preview');
-  const abortRef = useRef<AbortController | null>(null);
-
-  const handleSend = useCallback(async () => {
-    const prompt = inputValue.trim();
-    if (!prompt || generating) return;
-
-    setInputValue('');
-    setGenerating(true);
-
-    // 添加用户消息
-    const userMsg: ChatMessage = { role: 'user', content: prompt };
-    const assistantMsg: ChatMessage = { role: 'assistant', content: '', loading: true };
-    setMessages((prev) => [...prev, userMsg, assistantMsg]);
-
-    const abortController = new AbortController();
-    abortRef.current = abortController;
-
-    try {
-      const resp = await fetch('/agent/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ prompt, stream: true }),
-        signal: abortController.signal,
-      });
-
-      if (!resp.ok) {
-        throw new Error(`HTTP ${resp.status}`);
-      }
-
-      const reader = resp.body?.getReader();
-      if (!reader) throw new Error('无法读取响应流');
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let fullContent = '';
-      let modelUsed = '';
-      let doneHandled = false;
-
-      const processLine = async (line: string) => {
-        if (!line.startsWith('data: ')) return;
-
-        const dataStr = line.slice(6);
-        try {
-          const data = JSON.parse(dataStr);
-
-          if (data.model) {
-            modelUsed = data.model;
-            return;
-          }
-          if (data.error) {
-            message.error(data.error);
-            doneHandled = true;
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[updated.length - 1] = {
-                role: 'assistant',
-                content: `生成失败: ${data.error}`,
-                loading: false,
-              };
-              return updated;
-            });
-            return;
-          }
-          if (data.amis_json !== undefined) {
-            // 最终结果
-            doneHandled = true;
-            const amisJson = data.amis_json || fullContent;
-            setCurrentJson(amisJson);
-            fullContent = data.raw_content || fullContent;
-            modelUsed = data.model_used || modelUsed;
-
-            // 自动保存到历史记录
-            let historyId: number | undefined;
-            try {
-              const saved = await createHistory({
-                user_prompt: prompt,
-                generated_json: amisJson,
-                model_used: modelUsed || undefined,
-              });
-              historyId = saved.id;
-            } catch { /* 保存失败不影响体验 */ }
-
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[updated.length - 1] = {
-                role: 'assistant',
-                content: '已为您生成 amis 页面配置',
-                amisJson,
-                modelUsed,
-                historyId,
-                loading: false,
-              };
-              return updated;
-            });
-            return;
-          }
-          if (data.content) {
-            fullContent = data.full || (fullContent + data.content);
-            setMessages((prev) => {
-              const updated = [...prev];
-              updated[updated.length - 1] = {
-                role: 'assistant',
-                content: fullContent,
-                loading: true,
-              };
-              return updated;
-            });
-          }
-        } catch {
-          // 忽略无法解析的行
-        }
-      };
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
-
-        for (const line of lines) {
-          if (line.startsWith('event:')) continue;
-          await processLine(line);
-        }
-      }
-
-      // 处理 buffer 中残留的数据
-      if (buffer.trim()) {
-        for (const line of buffer.split('\n')) {
-          if (line.startsWith('event:')) continue;
-          await processLine(line);
-        }
-      }
-
-      // 兜底：流结束但 done 事件未被处理
-      if (!doneHandled && fullContent) {
-        const amisJson = fullContent;
-        setCurrentJson(amisJson);
-
-        let historyId: number | undefined;
-        try {
-          const saved = await createHistory({
-            user_prompt: prompt,
-            generated_json: amisJson,
-            model_used: modelUsed || undefined,
-          });
-          historyId = saved.id;
-        } catch { /* 保存失败不影响体验 */ }
-
-        setMessages((prev) => {
-          const updated = [...prev];
-          updated[updated.length - 1] = {
-            role: 'assistant',
-            content: '已为您生成 amis 页面配置',
-            amisJson,
-            modelUsed,
-            historyId,
-            loading: false,
-          };
-          return updated;
-        });
-      }
-    } catch (err: any) {
-      if (err.name === 'AbortError') return;
-      message.error(`生成失败: ${err.message}`);
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[updated.length - 1] = {
-          role: 'assistant',
-          content: `生成失败: ${err.message}`,
-          loading: false,
-        };
-        return updated;
-      });
-    } finally {
-      setGenerating(false);
-      abortRef.current = null;
-    }
-  }, [inputValue, generating]);
-
-  const handleAdopt = useCallback(async (msgIndex: number) => {
-    const msg = messages[msgIndex];
-    if (!msg?.historyId || !msg.amisJson) return;
-    try {
-      await adoptHistory(msg.historyId, { final_json: msg.amisJson });
-      setMessages((prev) => {
-        const updated = [...prev];
-        updated[msgIndex] = { ...updated[msgIndex], adopted: true };
-        return updated;
-      });
-      message.success('已采纳，加入知识库！下次生成会更智能');
-    } catch {
-      message.error('采纳失败');
-    }
-  }, [messages]);
+  const pendingResultRef = useRef<{ amisJson: string; modelUsed: string } | null>(null);
+  const extraDataRef = useRef<Map<string, { historyId?: number; adopted?: boolean; prompt?: string }>>(new Map());
+  const lastPromptRef = useRef('');
 
   const handleCopyJson = () => {
     if (currentJson) {
       navigator.clipboard.writeText(
-        typeof currentJson === 'string' ? currentJson : JSON.stringify(currentJson, null, 2)
+        typeof currentJson === 'string' ? currentJson : JSON.stringify(currentJson, null, 2),
       );
       message.success('已复制到剪贴板');
     }
   };
 
-  const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      handleSend();
+  const handleAdopt = useCallback(async (messageId: string) => {
+    const extra = extraDataRef.current.get(messageId);
+    if (!extra?.historyId) return;
+    const amisJson = currentJson;
+    if (!amisJson) return;
+    try {
+      await adoptHistory(extra.historyId, { final_json: amisJson });
+      extraDataRef.current.set(messageId, { ...extra, adopted: true });
+      message.success('已采纳，加入知识库！下次生成会更智能');
+    } catch {
+      message.error('采纳失败');
     }
-  };
+  }, [currentJson]);
 
   const parsedSchema = (() => {
     if (!currentJson) return null;
@@ -247,104 +126,102 @@ export default function Chat() {
 
   return (
     <div style={{ display: 'flex', height: 'calc(100vh - 140px)', gap: 16 }}>
-      {/* 左栏：对话面板 */}
+      {/* 左栏：ProChat 对话面板 */}
       <div style={{ width: '40%', display: 'flex', flexDirection: 'column' }}>
-        <div style={{ flex: 1, overflowY: 'auto', marginBottom: 12 }}>
-          {messages.length === 0 && (
-            <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999' }}>
-              <div style={{ fontSize: 48, marginBottom: 16 }}>🤖</div>
-              <Text type="secondary" style={{ fontSize: 16 }}>
-                描述你想要的页面，AI 帮你生成 amis 配置
-              </Text>
-              <div style={{ marginTop: 16, textAlign: 'left', maxWidth: 300, margin: '16px auto 0' }}>
-                <Text type="secondary">试试这些：</Text>
-                <ul style={{ color: '#666', marginTop: 8 }}>
-                  <li style={{ cursor: 'pointer', color: '#667eea' }} onClick={() => setInputValue('帮我做一个用户管理的 CRUD 页面，包含姓名、手机号、邮箱、状态字段')}>
-                    用户管理 CRUD 页面
-                  </li>
-                  <li style={{ cursor: 'pointer', color: '#667eea', marginTop: 4 }} onClick={() => setInputValue('做一个登录表单，包含用户名、密码、验证码和记住我选项')}>
-                    登录表单页面
-                  </li>
-                  <li style={{ cursor: 'pointer', color: '#667eea', marginTop: 4 }} onClick={() => setInputValue('做一个数据仪表盘，包含4个统计卡片和一个折线图')}>
-                    数据仪表盘
-                  </li>
-                </ul>
+        <ProChat
+          helloMessage="描述你想要的页面，AI 帮你生成 amis 配置"
+          placeholder="描述你想要的页面..."
+          markdownProps={{
+            components: {
+              // 覆盖默认的 shiki 代码块（shiki 的 WASM 加载经常失败导致空白），用简单的 <pre> 替代
+              pre: ({ children }: any) => (
+                <pre style={{
+                  background: '#f6f8fa',
+                  padding: 12,
+                  borderRadius: 8,
+                  overflow: 'auto',
+                  maxHeight: 400,
+                  fontSize: 13,
+                  lineHeight: 1.6,
+                }}>
+                  {children}
+                </pre>
+              ),
+            },
+          }}
+          request={async (messages: ChatMessage[]) => {
+            const history = messages.slice(0, -1).map((m) => ({
+              role: m.role as string,
+              content: typeof m.content === 'string' ? m.content : '',
+            }));
+            const lastMsg = messages[messages.length - 1];
+            const prompt = typeof lastMsg.content === 'string' ? lastMsg.content : '';
+            lastPromptRef.current = prompt;
+            pendingResultRef.current = null;
+
+            const resp = await fetch('/agent/generate', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prompt, stream: true, history }),
+            });
+
+            if (!resp.ok || !resp.body) {
+              throw new Error(`生成失败: HTTP ${resp.status}`);
+            }
+
+            // 转换 SSE 流为纯文本流
+            const transformedStream = transformSSEStream(resp.body, pendingResultRef);
+            return new Response(transformedStream);
+          }}
+          onChatEnd={async (id: string) => {
+            const result = pendingResultRef.current;
+            if (!result?.amisJson) return;
+
+            setCurrentJson(result.amisJson);
+
+            try {
+              const saved = await createHistory({
+                user_prompt: lastPromptRef.current,
+                generated_json: result.amisJson,
+                model_used: result.modelUsed || undefined,
+              });
+              extraDataRef.current.set(id, {
+                historyId: saved.id,
+                adopted: false,
+                prompt: lastPromptRef.current,
+              });
+            } catch {
+              // 保存失败不影响体验
+            }
+          }}
+          messageItemExtraRender={(msg: ChatMessage, type: string) => {
+            if (type !== 'assistant') return null;
+            const extra = extraDataRef.current.get(msg.id);
+            if (!extra) return null;
+
+            return (
+              <div style={{ marginTop: 4 }}>
+                <Space wrap size={4}>
+                  <Tag color="green">生成完成</Tag>
+                  {extra.adopted ? (
+                    <Tag color="success" icon={<CheckOutlined />}>已采纳</Tag>
+                  ) : extra.historyId ? (
+                    <Button
+                      size="small"
+                      type="primary"
+                      ghost
+                      icon={<CheckOutlined />}
+                      onClick={() => handleAdopt(msg.id)}
+                    >
+                      采纳入库
+                    </Button>
+                  ) : null}
+                </Space>
               </div>
-            </div>
-          )}
-
-          {messages.map((msg, i) => (
-            <div
-              key={i}
-              style={{
-                display: 'flex',
-                justifyContent: msg.role === 'user' ? 'flex-end' : 'flex-start',
-                marginBottom: 12,
-              }}
-            >
-              <Card
-                size="small"
-                style={{
-                  maxWidth: '85%',
-                  background: msg.role === 'user' ? '#667eea' : '#f5f5f5',
-                  color: msg.role === 'user' ? '#fff' : undefined,
-                  borderRadius: 12,
-                }}
-                styles={{ body: { padding: '8px 12px' } }}
-              >
-                {msg.loading ? (
-                  <Space>
-                    <Spin size="small" />
-                    <Text style={{ color: '#999' }}>生成中...</Text>
-                  </Space>
-                ) : (
-                  <>
-                    <div style={{ color: msg.role === 'user' ? '#fff' : undefined }}>
-                      {msg.content}
-                    </div>
-                    {msg.amisJson && (
-                      <div style={{ marginTop: 8 }}>
-                        <Space wrap>
-                          <Tag color="green">生成完成</Tag>
-                          {msg.modelUsed && <Tag>{msg.modelUsed}</Tag>}
-                          {msg.adopted ? (
-                            <Tag color="success" icon={<CheckOutlined />}>已采纳</Tag>
-                          ) : msg.historyId ? (
-                            <Button size="small" type="primary" ghost icon={<CheckOutlined />} onClick={() => handleAdopt(i)}>
-                              采纳入库
-                            </Button>
-                          ) : null}
-                        </Space>
-                      </div>
-                    )}
-                  </>
-                )}
-              </Card>
-            </div>
-          ))}
-        </div>
-
-        {/* 输入框 */}
-        <div style={{ display: 'flex', gap: 8 }}>
-          <TextArea
-            value={inputValue}
-            onChange={(e) => setInputValue(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="描述你想要的页面..."
-            autoSize={{ minRows: 2, maxRows: 4 }}
-            disabled={generating}
-            style={{ flex: 1 }}
-          />
-          <Button
-            type="primary"
-            icon={<SendOutlined />}
-            onClick={handleSend}
-            loading={generating}
-            style={{ height: 'auto', minHeight: 52 }}
-          >
-            发送
-          </Button>
-        </div>
+            );
+          }}
+          style={{ height: '100%' }}
+        />
       </div>
 
       {/* 右栏：预览面板 */}

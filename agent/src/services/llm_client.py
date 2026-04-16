@@ -27,7 +27,7 @@ async def get_llm_config(task_type: str) -> dict:
         if now - ts < CACHE_TTL:
             return config
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         resp = await client.get(
             f"{RUST_BACKEND_URL}/api/internal/llm/resolve/{task_type}",
             headers={"X-Internal-Key": INTERNAL_API_KEY},
@@ -56,7 +56,7 @@ async def chat_completion(
     if config.get("max_tokens"):
         body["max_tokens"] = config["max_tokens"]
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         resp = await client.post(
             f"{config['base_url']}/chat/completions",
             headers={
@@ -88,7 +88,7 @@ async def chat_completion_stream(
     if config.get("max_tokens"):
         body["max_tokens"] = config["max_tokens"]
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(trust_env=False) as client:
         async with client.stream(
             "POST",
             f"{config['base_url']}/chat/completions",

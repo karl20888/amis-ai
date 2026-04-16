@@ -9,7 +9,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from ..models.schemas import GenerateRequest
 from ..services.llm_client import chat_completion, chat_completion_stream, get_llm_config
-from ..services.prompt import build_prompt
+from ..services.prompt import build_messages
 from ..services.rag import retrieve_context
 
 router = APIRouter()
@@ -38,13 +38,13 @@ async def generate_amis(request: GenerateRequest):
     except Exception as e:
         print(f"[RAG] 检索失败（降级为无上下文生成）: {e}")
 
-    # 构建 prompt（含 RAG 上下文）
-    system_prompt, user_prompt = build_prompt(request.prompt, rag_contexts=rag_contexts or None)
-
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
+    # 构建消息列表（含历史对话 + RAG 上下文）
+    history = [{"role": m.role, "content": m.content} for m in request.history]
+    messages = build_messages(
+        request.prompt,
+        history=history or None,
+        rag_contexts=rag_contexts or None,
+    )
 
     if request.stream:
         return EventSourceResponse(
